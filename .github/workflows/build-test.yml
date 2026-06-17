@@ -7,7 +7,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        pg: [13, 14, 15, 16, 17, 18]
+        pg: [17, 18]
     container:
       image: pgxn/pgxn-tools
     steps:
@@ -15,7 +15,7 @@ jobs:
         run: pg-start ${{ matrix.pg }}
 
       - name: Check out repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Build & test extension
         run: pg-build-test

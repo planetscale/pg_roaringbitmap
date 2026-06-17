@@ -1,0 +1,143 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-latest
+      fail-fast: false
+    runs-on: ${{ matrix.runner }}
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+        if: matrix.arch == 'arm64'
+
+      - name: Get version from tag
+        id: version
+        run: |
+          echo "VERSION=${GITHUB_REF#refs/tags/v}-1" >> $GITHUB_OUTPUT
+          echo "GIT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Build Docker image with packages
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
+        with:
+          context: .
+          file: ./Dockerfile.pscale-debian12
+          push: false
+          load: true
+          tags: pg-roaringbitmap-builder
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.VERSION }}
+            GIT_SHA=${{ steps.version.outputs.GIT_SHA }}
+
+      - name: Extract .deb packages from Docker image
+        run: |
+          # Create a temporary container to copy files from
+          CONTAINER_ID=$(docker create \
+            --stop-timeout=1 \
+            --entrypoint="" \
+            pg-roaringbitmap-builder \
+              tail -f /dev/null)
+          docker start "${CONTAINER_ID}"
+
+          # Copy .deb files from container
+          docker exec ${CONTAINER_ID} sh -c 'tar -cf - /*.deb' | tar -xf -
+
+          # Clean up the container
+          docker stop ${CONTAINER_ID} || true
+          docker rm ${CONTAINER_ID} || true
+
+          # List the .deb files for verification
+          ls -la *.deb
+
+      - name: Verify package contents
+        run: |
+          # Verify that each PostgreSQL version package contains the crucial files
+          for deb in postgresql-*-roaringbitmap_*.deb; do
+            echo "Verifying $deb..."
+
+            # Extract the package and check contents
+            ar x "$deb" data.tar.xz
+
+            # Derive the PostgreSQL major version from the package name
+            PG_VERSION=$(echo "$deb" | sed -n 's/postgresql-\([0-9]*\)-roaringbitmap_.*/\1/p')
+
+            # Verify .so file exists
+            if ! tar -tf data.tar.xz | grep -q "./usr/lib/postgresql/${PG_VERSION}/lib/roaringbitmap.so"; then
+              echo "ERROR: Missing roaringbitmap.so in $deb"
+              exit 1
+            fi
+
+            # Verify control file exists
+            if ! tar -tf data.tar.xz | grep -q "./usr/share/postgresql/${PG_VERSION}/extension/roaringbitmap.control"; then
+              echo "ERROR: Missing roaringbitmap.control in $deb"
+              exit 1
+            fi
+
+            # Verify SQL file exists
+            if ! tar -tf data.tar.xz | grep -q "./usr/share/postgresql/${PG_VERSION}/extension/roaringbitmap--1.2.sql"; then
+              echo "ERROR: Missing roaringbitmap--1.2.sql in $deb"
+              exit 1
+            fi
+
+            echo "✓ $deb contains all crucial files"
+            rm -f data.tar.xz
+          done
+          echo "All packages verified successfully!"
+
+      - name: Calculate checksums
+        run: |
+          for file in *.deb; do
+            sha256sum "$file" > "$file.sha256"
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pg-roaringbitmap-${{ matrix.arch }}
+          path: |
+            *.deb
+            *.deb.sha256
+          retention-days: 30
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: packages/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: |
+            packages/**/*.deb
+            packages/**/*.deb.sha256
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
