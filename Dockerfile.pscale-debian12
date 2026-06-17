@@ -1,0 +1,42 @@
+FROM postgres:18.1-bookworm AS deps
+
+# VERSION should be injected by the ci release workflow as a build-arg based on the git tag pushed to the repo
+ARG VERSION=1.2.0-1.pscale1
+ARG GIT_SHA=unknown
+ENV VERSION=${VERSION}
+ENV GIT_SHA=${GIT_SHA}
+
+RUN apt-get -qy update && \
+	apt-get install -qy --no-install-recommends \
+		architecture-is-64-bit \
+		build-essential \
+		devscripts \
+		debhelper-compat \
+		lsb-release \
+		postgresql-all \
+		postgresql-server-dev-all
+
+FROM deps AS builder
+
+COPY . /src
+WORKDIR /src
+
+# this modifies the /src/debian/control.in template to make entries for all supported PostgreSQL versions
+RUN pg_buildext updatecontrol
+
+# this modifies the /src/debian/changelog file used by dpkg-buildpackage to set the version to use on the packages
+RUN dch -v "${VERSION}" \
+	--distribution "$(lsb_release -cs)" \
+	"Custom PlanetScale build"
+
+# This builds .deb packages for all supported PostgreSQL versions
+# and places them in ../ (relative to WORKDIR)
+RUN dpkg-buildpackage -us -uc -b
+
+# final image simply holds the built .deb packages
+#
+# this is an optimization to speed up CI by avoiding the slow process of
+# copying the full builder image into the local docker daemon when all we do
+# is start it once to copy out the packages.
+FROM postgres:18.1-bookworm
+COPY --from=builder /*.deb /

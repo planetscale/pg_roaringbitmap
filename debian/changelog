@@ -1,0 +1,8 @@
+pg-roaringbitmap (1.2.0-1.pscale1) unstable; urgency=medium
+
+  * Initial PlanetScale build of pg_roaringbitmap.
+  * Includes upstream fix hardening validation of untrusted bitmap blobs
+    in the recv functions (bounds all deserialization by the BYTEA length).
+  * Support for PostgreSQL 17-18.
+
+ -- PlanetScale <noreply@planetscale.com>  Wed, 17 Jun 2026 00:00:00 +0000

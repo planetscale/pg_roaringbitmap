@@ -1,0 +1,26 @@
+Source: pg-roaringbitmap
+Priority: optional
+Maintainer: PlanetScale <noreply@planetscale.com>
+Build-Depends:
+ architecture-is-64-bit <!pkg.postgresql.32-bit>,
+ debhelper-compat (= 13),
+ postgresql-all <!nocheck>,
+ postgresql-server-dev-all,
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+Section: database
+Homepage: https://github.com/planetscale/pg_roaringbitmap
+Vcs-Git: https://github.com/planetscale/pg_roaringbitmap.git
+Vcs-Browser: https://github.com/planetscale/pg_roaringbitmap
+
+Package: postgresql-PGVERSION-roaringbitmap
+Section: libs
+Architecture: any
+Depends:
+ ${misc:Depends},
+ ${postgresql:Depends},
+ ${shlibs:Depends},
+Description: RoaringBitmap data type for PostgreSQL
+ This extension provides a Roaring Bitmap data type called "roaringbitmap"
+ for PostgreSQL, along with convenience operators and functions for
+ constructing and handling Roaring Bitmaps.

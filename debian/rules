@@ -1,0 +1,24 @@
+#!/usr/bin/make -f
+
+DPKG_EXPORT_BUILDFLAGS = 1
+include /usr/share/dpkg/buildflags.mk
+
+export USE_PGXS=1
+
+override_dh_installdocs:
+	dh_installdocs --all README.md
+	# remove docs that belong elsewhere
+	rm -rf debian/*/usr/share/doc/postgresql-doc-*
+
+override_dh_auto_clean:
+	dh_auto_clean
+	# skip pg_buildext clean operations
+
+clean:
+	dh_clean
+
+override_dh_pgxs_test:
+	# Skip tests in docker build - they fail in containerized environment
+
+%:
+	dh $@ --with pgxs_loop
