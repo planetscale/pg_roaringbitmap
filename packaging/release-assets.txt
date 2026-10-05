@@ -1,0 +1,15 @@
+# Release contract for planetscale/pg_roaringbitmap v<version> releases.
+# One row per build: major debian asset_arch deb_arch
+# Each row ships the main and -dbgsym .deb, each with a <asset>.sha256 sidecar
+# (4 files per row). Debian 12 assets use the canonical Debian names; Debian 13
+# assets add the release-only prefix pg<major>-trixie-<asset_arch>-.
+17 12 arm64 arm64
+17 12 x86_64 amd64
+18 12 arm64 arm64
+18 12 x86_64 amd64
+18 13 arm64 arm64
+18 13 x86_64 amd64
+19 12 arm64 arm64
+19 12 x86_64 amd64
+19 13 arm64 arm64
+19 13 x86_64 amd64
