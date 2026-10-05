@@ -1,0 +1,379 @@
+#!/usr/bin/env bash
+#
+# Exact-package test for the pg_roaringbitmap release assets of one build row.
+# Runs as root in the clean `test` stage of Dockerfile.package:
+#
+#   1. asset names, .sha256 sidecars, .deb metadata and exact manifests
+#      (expectations taken from debian/control.in and the v1.2.0-1.pscale1
+#      release assets)
+#   2. dpkg -i into the clean image (no extra packages may be pulled in)
+#   3. initdb + start (roaringbitmap needs no preload); CREATE EXTENSION and
+#      behavior probes: set operations, aggregates, roaringbitmap64, a binary
+#      COPY round-trip through *_recv, and corrupt blobs rejected
+#   4. the regression suite (sql/*.sql, as the Makefile's REGRESS) against the
+#      installed .so. postgresql-client-<M> ships pg_regress, so nothing is
+#      built or added; the .so checksum must not change.
+#
+# --probes-only skips 1-2 and runs 3-4 against an existing installation
+# (--bindir), as the current user unless root. This lets the probes run on a
+# developer machine against a source build, without Docker.
+
+set -euo pipefail
+
+PG_MAJOR=""
+DEBIAN_VERSION=""
+ASSET_ARCH=""
+PACKAGE_VERSION=""
+PACKAGES_DIR=/packages
+SRC_DIR=/src
+BINDIR=""
+PROBES_ONLY=false
+PG_PACKAGE_VERSION=${PG_PACKAGE_VERSION:-}
+
+usage() {
+	echo "usage: scripts/test-package --pg <17|18|19> --debian <12|13> --asset-arch <x86_64|arm64> --version <package-version> [--packages <dir>] [--src <dir>]" >&2
+	echo "       scripts/test-package --probes-only --pg <17|18|19> --bindir <dir> [--src <dir>]" >&2
+	echo "       PG_PACKAGE_VERSION must name the pinned PGDG server version (package mode)" >&2
+	exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--pg) PG_MAJOR=${2:-}; shift 2 ;;
+	--debian) DEBIAN_VERSION=${2:-}; shift 2 ;;
+	--asset-arch) ASSET_ARCH=${2:-}; shift 2 ;;
+	--version) PACKAGE_VERSION=${2:-}; shift 2 ;;
+	--packages) PACKAGES_DIR=${2:-}; shift 2 ;;
+	--src) SRC_DIR=${2:-}; shift 2 ;;
+	--bindir) BINDIR=${2:-}; shift 2 ;;
+	--probes-only) PROBES_ONLY=true; shift ;;
+	*) echo "test-package: unknown argument: $1" >&2; usage ;;
+	esac
+done
+
+[[ "$PG_MAJOR" =~ ^(17|18|19)$ ]] && [[ -d "$SRC_DIR/sql" && -d "$SRC_DIR/expected" ]] || usage
+if $PROBES_ONLY; then
+	[[ -x "$BINDIR/pg_config" ]] || usage
+else
+	if [[ ! "$DEBIAN_VERSION" =~ ^(12|13)$ ]] || [[ ! "$ASSET_ARCH" =~ ^(x86_64|arm64)$ ]] ||
+		[[ -z "$PACKAGE_VERSION" ]] || [[ -z "$PG_PACKAGE_VERSION" ]] || [[ ! -d "$PACKAGES_DIR" ]]; then
+		usage
+	fi
+	BINDIR="/usr/lib/postgresql/${PG_MAJOR}/bin"
+fi
+
+fail() {
+	echo "test-package: FAIL: $*" >&2
+	exit 1
+}
+
+expect_eq() {
+	local what=$1 actual=$2 expected=$3
+	[[ "$actual" == "$expected" ]] || fail "$what: expected '$expected', got '$actual'"
+}
+
+sha256() {
+	if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi
+}
+
+PKG="postgresql-${PG_MAJOR}-roaringbitmap"
+PKGLIBDIR=$("$BINDIR/pg_config" --pkglibdir)
+
+if ! $PROBES_ONLY; then
+	case "$ASSET_ARCH" in
+	x86_64) DEB_ARCH=amd64 ;;
+	arm64) DEB_ARCH=arm64 ;;
+	esac
+	PREFIX=""
+	if [[ "$DEBIAN_VERSION" == 13 ]]; then
+		PREFIX="pg${PG_MAJOR}-trixie-${ASSET_ARCH}-"
+	fi
+	MAIN_ASSET="${PREFIX}${PKG}_${PACKAGE_VERSION}_${DEB_ARCH}.deb"
+	DBGSYM_ASSET="${PREFIX}${PKG}-dbgsym_${PACKAGE_VERSION}_${DEB_ARCH}.deb"
+	MAIN_DEB="$PACKAGES_DIR/$MAIN_ASSET"
+	DBGSYM_DEB="$PACKAGES_DIR/$DBGSYM_ASSET"
+	expect_eq "pkglibdir" "$PKGLIBDIR" "/usr/lib/postgresql/${PG_MAJOR}/lib"
+
+	echo "test-package: PG ${PG_MAJOR} / Debian ${DEBIAN_VERSION} / ${ASSET_ARCH} / ${PACKAGE_VERSION}"
+
+	# --- pinned runtime -----------------------------------------------------------
+	expect_eq "postgresql-${PG_MAJOR} version" \
+		"$(dpkg-query -W -f='${Version}' "postgresql-${PG_MAJOR}")" "$PG_PACKAGE_VERSION"
+	expect_eq "/usr/lib/postgresql" "$(find /usr/lib/postgresql -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | xargs)" "$PG_MAJOR"
+	if [[ "$PG_MAJOR" != 19 ]] && grep -Eq -- '-pgdg .*\b19\b' /etc/apt/sources.list.d/pgdg.list; then
+		fail "PGDG component 19 is enabled on a PG ${PG_MAJOR} row"
+	fi
+
+	# --- 1. asset set, checksums --------------------------------------------------
+	# Same contract as v1.2.0-1.pscale1: main + dbgsym, each with a sidecar
+	# holding `sha256sum <asset>` output.
+	expected_assets=$(printf '%s\n' "$MAIN_ASSET" "$MAIN_ASSET.sha256" "$DBGSYM_ASSET" "$DBGSYM_ASSET.sha256" | sort)
+	actual_assets=$(find "$PACKAGES_DIR" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
+	if [[ "$actual_assets" != "$expected_assets" ]]; then
+		diff <(echo "$expected_assets") <(echo "$actual_assets") >&2 || true
+		fail "asset set in $PACKAGES_DIR does not match"
+	fi
+	for asset in "$MAIN_ASSET" "$DBGSYM_ASSET"; do
+		expect_eq "$asset.sha256" "$(cat "$PACKAGES_DIR/$asset.sha256")" \
+			"$(cd "$PACKAGES_DIR" && sha256sum "$asset")"
+	done
+
+	# --- metadata -----------------------------------------------------------------
+	# From debian/control.in; matches v1.2.0-1.pscale1 (no Breaks field there).
+	field() { dpkg-deb --field "$1" "$2"; }
+	expect_eq Package "$(field "$MAIN_DEB" Package)" "$PKG"
+	expect_eq Version "$(field "$MAIN_DEB" Version)" "$PACKAGE_VERSION"
+	expect_eq Architecture "$(field "$MAIN_DEB" Architecture)" "$DEB_ARCH"
+	expect_eq Source "$(field "$MAIN_DEB" Source)" pg-roaringbitmap
+	expect_eq Section "$(field "$MAIN_DEB" Section)" libs
+	expect_eq Priority "$(field "$MAIN_DEB" Priority)" optional
+	expect_eq Maintainer "$(field "$MAIN_DEB" Maintainer)" "PlanetScale <noreply@planetscale.com>"
+	expect_eq Homepage "$(field "$MAIN_DEB" Homepage)" https://github.com/planetscale/pg_roaringbitmap
+	depends=$(field "$MAIN_DEB" Depends)
+	[[ "$depends" =~ ^postgresql-${PG_MAJOR},\ libc6\ \(\>=\ [0-9.]+\)$ ]] || fail "Depends: $depends"
+	expect_eq Breaks "$(field "$MAIN_DEB" Breaks)" ""
+
+	expect_eq dbgsym.Package "$(field "$DBGSYM_DEB" Package)" "$PKG-dbgsym"
+	expect_eq dbgsym.Version "$(field "$DBGSYM_DEB" Version)" "$PACKAGE_VERSION"
+	expect_eq dbgsym.Architecture "$(field "$DBGSYM_DEB" Architecture)" "$DEB_ARCH"
+	expect_eq dbgsym.Section "$(field "$DBGSYM_DEB" Section)" debug
+	expect_eq dbgsym.Depends "$(field "$DBGSYM_DEB" Depends)" "$PKG (= $PACKAGE_VERSION)"
+	build_id=$(field "$DBGSYM_DEB" Build-Ids)
+	[[ "$build_id" =~ ^[0-9a-f]{40}$ ]] || fail "dbgsym Build-Ids: $build_id"
+
+	# --- manifests ----------------------------------------------------------------
+	# Path column of `dpkg-deb --contents` (symlinks keep their "-> target").
+	# changelog.gz is the upstream CHANGELOG.md (dh_installchangelogs).
+	manifest() { dpkg-deb --contents "$1" | awk '{ $1 = $2 = $3 = $4 = $5 = ""; sub(/^ +/, ""); print }' | sort; }
+
+	ext=./usr/share/postgresql/${PG_MAJOR}/extension
+	expected_main=$(sort <<EOF
+./
+./usr/
+./usr/lib/
+./usr/lib/postgresql/
+./usr/lib/postgresql/${PG_MAJOR}/
+./usr/lib/postgresql/${PG_MAJOR}/lib/
+./usr/lib/postgresql/${PG_MAJOR}/lib/bitcode/
+./usr/lib/postgresql/${PG_MAJOR}/lib/bitcode/roaringbitmap/
+./usr/lib/postgresql/${PG_MAJOR}/lib/bitcode/roaringbitmap/roaring64_buffer_reader.bc
+./usr/lib/postgresql/${PG_MAJOR}/lib/bitcode/roaringbitmap/roaring_buffer_reader.bc
+./usr/lib/postgresql/${PG_MAJOR}/lib/bitcode/roaringbitmap/roaringbitmap.bc
+./usr/lib/postgresql/${PG_MAJOR}/lib/bitcode/roaringbitmap/roaringbitmap64.bc
+./usr/lib/postgresql/${PG_MAJOR}/lib/bitcode/roaringbitmap.index.bc
+./usr/lib/postgresql/${PG_MAJOR}/lib/roaringbitmap.so
+./usr/share/
+./usr/share/doc/
+./usr/share/doc/${PKG}/
+./usr/share/doc/${PKG}/README.md.gz
+./usr/share/doc/${PKG}/changelog.Debian.gz
+./usr/share/doc/${PKG}/changelog.gz
+./usr/share/doc/${PKG}/copyright
+./usr/share/postgresql/
+./usr/share/postgresql/${PG_MAJOR}/
+${ext}/
+${ext}/roaringbitmap--0.2--0.3.sql
+${ext}/roaringbitmap--0.2.sql
+${ext}/roaringbitmap--0.3--0.4.sql
+${ext}/roaringbitmap--0.4--0.5.sql
+${ext}/roaringbitmap--0.5--1.0.sql
+${ext}/roaringbitmap--1.0--1.1.sql
+${ext}/roaringbitmap--1.1--1.2.sql
+${ext}/roaringbitmap--1.2.sql
+${ext}/roaringbitmap.control
+EOF
+	)
+	expected_dbgsym=$(sort <<EOF
+./
+./usr/
+./usr/lib/
+./usr/lib/debug/
+./usr/lib/debug/.build-id/
+./usr/lib/debug/.build-id/${build_id:0:2}/
+./usr/lib/debug/.build-id/${build_id:0:2}/${build_id:2}.debug
+./usr/share/
+./usr/share/doc/
+./usr/share/doc/${PKG}-dbgsym -> ${PKG}
+EOF
+	)
+	for kind in main dbgsym; do
+		if [[ "$kind" == main ]]; then deb=$MAIN_DEB expected=$expected_main; else deb=$DBGSYM_DEB expected=$expected_dbgsym; fi
+		actual=$(manifest "$deb")
+		if [[ "$actual" != "$expected" ]]; then
+			diff <(echo "$expected") <(echo "$actual") >&2 || true
+			fail "$kind manifest differs"
+		fi
+	done
+
+	# --- 2. clean install ---------------------------------------------------------
+	before=$(dpkg-query -W -f='${Package}\n' | sort)
+	dpkg -i "$MAIN_DEB" "$DBGSYM_DEB"
+	after=$(dpkg-query -W -f='${Package}\n' | sort)
+	expect_eq "packages added by install" "$(comm -13 <(echo "$before") <(echo "$after") | xargs)" "$PKG $PKG-dbgsym"
+	expect_eq "installed version" "$(dpkg-query -W -f='${Version}' "$PKG")" "$PACKAGE_VERSION"
+	dpkg --verify "$PKG" "$PKG-dbgsym" || fail "dpkg --verify"
+fi
+
+SO=""
+for suffix in .so .dylib; do
+	[[ -f "$PKGLIBDIR/roaringbitmap$suffix" ]] && SO="$PKGLIBDIR/roaringbitmap$suffix" && break
+done
+[[ -n "$SO" ]] || fail "roaringbitmap library missing in $PKGLIBDIR"
+so_sha=$(sha256 "$SO")
+
+# --- cluster helpers ------------------------------------------------------------
+if [[ $EUID -eq 0 ]]; then
+	WORK=/tmp/roaringbitmap-test
+	RUN_AS=(runuser -u postgres --)
+else
+	WORK=$(mktemp -d)
+	RUN_AS=()
+fi
+SOCK=$WORK/sock
+PORT=55435
+PGDATA_DIR=$WORK/data
+LOG=$WORK/postgres.log
+export PGHOST=$SOCK PGPORT=$PORT
+
+as_pg_user() { ${RUN_AS[@]+"${RUN_AS[@]}"} env PATH="$BINDIR:$PATH" "$@"; }
+
+# mkdir_pg <dir>...: directories owned by the user running the server
+mkdir_pg() {
+	mkdir -p "$@"
+	[[ $EUID -ne 0 ]] || chown postgres:postgres "$@"
+}
+
+psql_q() { "$BINDIR/psql" -X -q -A -t -v ON_ERROR_STOP=1 -U postgres -d postgres "$@"; }
+
+start_cluster() {
+	stop_cluster
+	rm -rf "$PGDATA_DIR" "$SOCK" "$LOG"
+	mkdir_pg "$WORK" "$SOCK"
+	as_pg_user initdb -D "$PGDATA_DIR" -U postgres --auth=trust --no-locale -E UTF8 >/dev/null
+	local opts="-c port=$PORT -c listen_addresses='' -c unix_socket_directories=$SOCK"
+	as_pg_user pg_ctl -D "$PGDATA_DIR" -l "$LOG" -w -o "$opts" start >/dev/null ||
+		{ cat "$LOG" >&2; fail "server did not start"; }
+	expect_eq "server major" "$(psql_q -c "SELECT current_setting('server_version_num')::int / 10000")" "$PG_MAJOR"
+}
+
+stop_cluster() {
+	if [[ -f "$PGDATA_DIR/postmaster.pid" ]]; then
+		as_pg_user pg_ctl -D "$PGDATA_DIR" -m fast -w stop >/dev/null
+	fi
+	if [[ -f "$LOG" ]] && grep -E 'PANIC|TRAP:|terminated by signal|server process .* was terminated' "$LOG" >&2; then
+		fail "server log has crashes"
+	fi
+	return 0
+}
+
+cleanup() {
+	stop_cluster || true
+	[[ $EUID -eq 0 ]] || rm -rf "$WORK"
+}
+trap cleanup EXIT
+
+# probe <label> <expected> <sql>: single-value result, array output format
+probe() {
+	expect_eq "$1" "$(PGOPTIONS='-c roaringbitmap.output_format=array' psql_q -c "$3")" "$2"
+}
+
+expect_error() {
+	local sql=$1 pattern=$2 out
+	if out=$(psql_q -c "$sql" 2>&1); then
+		fail "'$sql' succeeded, expected: $pattern"
+	fi
+	grep -Fq "$pattern" <<<"$out" || fail "'$sql': unexpected error: $out"
+}
+
+# --- 3. CREATE EXTENSION + behavior probes (runtime dependencies only) ---------
+echo "test-package: behavior probes"
+start_cluster
+if grep -E 'WARNING|ERROR|FATAL' "$LOG" >&2; then fail "startup log has warnings/errors"; fi
+
+psql_q -c 'CREATE EXTENSION roaringbitmap'
+probe extversion 1.2 "SELECT extversion FROM pg_extension WHERE extname = 'roaringbitmap'"
+
+# The postgres-private consumer probes (tests/pg_regress/common/sql/roaringbitmap.sql).
+probe rb_cardinality 5 "SELECT rb_cardinality(roaringbitmap('{1,2,3,100,1000}'))"
+probe "& (and)" '{2,3}' "SELECT roaringbitmap('{1,2,3}') & roaringbitmap('{2,3,4}')"
+probe "| (or)" '{1,2,3,4,5}' "SELECT roaringbitmap('{1,2,3}') | roaringbitmap('{3,4,5}')"
+probe "# (xor)" '{1,4}' "SELECT roaringbitmap('{1,2,3}') # roaringbitmap('{2,3,4}')"
+probe "- (andnot)" '{1}' "SELECT roaringbitmap('{1,2,3}') - roaringbitmap('{2,3}')"
+probe rb_contains t "SELECT rb_contains(roaringbitmap('{1,2,3}'), 2)"
+probe "rb_contains (absent)" f "SELECT rb_contains(roaringbitmap('{1,2,3}'), 4)"
+probe "rb_min/rb_max" '5|15' "SELECT rb_min(roaringbitmap('{5,10,15}')), rb_max(roaringbitmap('{5,10,15}'))"
+probe rb_to_array '{7,8,9}' "SELECT rb_to_array(roaringbitmap('{9,7,8}'))"
+probe rb_or '{1,2,3,4,5}' "SELECT rb_or(roaringbitmap('{1,2,3}'), roaringbitmap('{3,4,5}'))"
+probe rb_and '{2,3}' "SELECT rb_and(roaringbitmap('{1,2,3}'), roaringbitmap('{2,3,4}'))"
+probe rb_build_agg 5 "SELECT rb_cardinality(rb_build_agg(id)) FROM (VALUES (1), (2), (2), (3), (5), (8)) v(id)"
+probe "rb_build_agg 100k" 100000 "SELECT rb_cardinality(rb_build_agg(i)) FROM generate_series(1, 100000) i"
+probe rb_or_agg '{1,2,3,4}' "SELECT rb_or_agg(rb) FROM (VALUES (roaringbitmap('{1,2}')), (roaringbitmap('{3,4}'))) v(rb)"
+
+# roaringbitmap64, with values above 2^32.
+probe rb64_cardinality 3 "SELECT rb64_cardinality(rb64_build('{1,4294967296,9223372036854775807}'::bigint[]))"
+probe "rb64 |" '{1,4294967296,8589934592}' \
+	"SELECT rb64_build('{1,4294967296}'::bigint[]) | rb64_build('{4294967296,8589934592}'::bigint[])"
+probe rb64_contains t "SELECT rb64_contains(rb64_build('{4294967296}'::bigint[]), 4294967296::bigint)"
+probe rb64_build_agg '4294967290|4294967300|11' \
+	"SELECT rb64_min(b), rb64_max(b), rb64_cardinality(b) FROM (SELECT rb64_build_agg(i) b FROM generate_series(4294967290::bigint, 4294967300::bigint) i) s"
+
+# Binary COPY round-trip through roaringbitmap{,64}_send/_recv.
+mkdir_pg "$WORK/copy"
+psql_q <<EOF
+CREATE TABLE rb_bin (id int, rb roaringbitmap, rb64 roaringbitmap64);
+INSERT INTO rb_bin
+    SELECT g, rb_build_agg(x), rb64_build_agg(x::bigint * 4294967296)
+    FROM generate_series(1, 5) g, generate_series(1, g * 1000) x GROUP BY g;
+INSERT INTO rb_bin VALUES (0, '{}', '{}');
+COPY rb_bin TO '$WORK/copy/rb.bin' (FORMAT binary);
+CREATE TABLE rb_bin2 (LIKE rb_bin);
+COPY rb_bin2 FROM '$WORK/copy/rb.bin' (FORMAT binary);
+EOF
+probe "binary COPY round-trip" 6 \
+	"SELECT count(*) FROM rb_bin a JOIN rb_bin2 b USING (id) WHERE rb_equals(a.rb, b.rb) AND rb64_equals(a.rb64, b.rb64)"
+
+# Corrupt blobs are rejected by *_recv and the bytea casts, without crashing.
+psql_q -c "COPY (SELECT 1, '\\x0102'::bytea, NULL::bytea) TO '$WORK/copy/bad.bin' (FORMAT binary)" \
+	-c "COPY (SELECT 1, NULL::bytea, '\\x0102'::bytea) TO '$WORK/copy/bad64.bin' (FORMAT binary)" \
+	-c "COPY (SELECT 1, ''::bytea, NULL::bytea) TO '$WORK/copy/empty.bin' (FORMAT binary)"
+for f in bad bad64 empty; do
+	expect_error "COPY rb_bin2 FROM '$WORK/copy/$f.bin' (FORMAT binary)" 'bitmap format is error'
+done
+expect_error "SELECT '\\x0102'::bytea::roaringbitmap" 'bitmap format is error'
+expect_error "SELECT '\\x0102'::bytea::roaringbitmap64" 'bitmap format is error'
+probe "rows after rejected input" 6 "SELECT count(*) FROM rb_bin2"
+psql_q -c 'DROP EXTENSION roaringbitmap CASCADE'
+stop_cluster
+
+# --- 4. regression suite against the installed .so -----------------------------
+# The Makefile's REGRESS is every sql/*.sql.
+PG_REGRESS="$(dirname "$("$BINDIR/pg_config" --pgxs)")/../test/regress/pg_regress"
+[[ -x "$PG_REGRESS" ]] || fail "$PG_REGRESS missing"
+tests=()
+for f in "$SRC_DIR"/sql/*.sql; do
+	t=$(basename "$f" .sql)
+	[[ -f "$SRC_DIR/expected/$t.out" ]] || fail "no expected/$t.out"
+	tests+=("$t")
+done
+[[ ${#tests[@]} -gt 0 ]] || fail "no regression tests in $SRC_DIR/sql"
+
+echo "test-package: REGRESS (${tests[*]})"
+start_cluster
+regress_dir=$WORK/regress
+rm -rf "$regress_dir"
+mkdir_pg "$regress_dir"
+cp -R "$SRC_DIR/sql" "$SRC_DIR/expected" "$regress_dir/"
+[[ $EUID -ne 0 ]] || chown -R postgres:postgres "$regress_dir"
+if ! (cd "$regress_dir" && as_pg_user "$PG_REGRESS" --inputdir=. --bindir="$BINDIR" \
+	--host="$SOCK" --port="$PORT" --user=postgres --dbname=contrib_regression "${tests[@]}"); then
+	cat "$regress_dir/regression.diffs" >&2 || true
+	fail "REGRESS failed"
+fi
+stop_cluster
+expect_eq "roaringbitmap library after all tests" "$(sha256 "$SO")" "$so_sha"
+
+if $PROBES_ONLY; then
+	echo "test-package: PG ${PG_MAJOR} probes against $BINDIR passed"
+else
+	echo "test-package: PG ${PG_MAJOR} / Debian ${DEBIAN_VERSION} / ${ASSET_ARCH} passed"
+fi
