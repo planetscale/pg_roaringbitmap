@@ -335,9 +335,14 @@ probe "binary COPY round-trip" 6 \
 # Corrupt blobs are rejected by *_recv and the bytea casts, without crashing.
 psql_q -c "COPY (SELECT 1, '\\x0102'::bytea, NULL::bytea) TO '$WORK/copy/bad.bin' (FORMAT binary)" \
 	-c "COPY (SELECT 1, NULL::bytea, '\\x0102'::bytea) TO '$WORK/copy/bad64.bin' (FORMAT binary)" \
-	-c "COPY (SELECT 1, ''::bytea, NULL::bytea) TO '$WORK/copy/empty.bin' (FORMAT binary)"
-for f in bad bad64 empty; do
+	-c "COPY (SELECT 1, ''::bytea, NULL::bytea) TO '$WORK/copy/empty.bin' (FORMAT binary)" \
+	-c "COPY (SELECT 1, NULL::bytea, ''::bytea) TO '$WORK/copy/empty64.bin' (FORMAT binary)"
+for f in bad bad64; do
 	expect_error "COPY rb_bin2 FROM '$WORK/copy/$f.bin' (FORMAT binary)" 'bitmap format is error'
+done
+# Upstream 1.2.0 (c9e0d60) rejects empty binary input explicitly.
+for f in empty empty64; do
+	expect_error "COPY rb_bin2 FROM '$WORK/copy/$f.bin' (FORMAT binary)" 'empty roaring bitmap binary data'
 done
 expect_error "SELECT '\\x0102'::bytea::roaringbitmap" 'bitmap format is error'
 expect_error "SELECT '\\x0102'::bytea::roaringbitmap64" 'bitmap format is error'
