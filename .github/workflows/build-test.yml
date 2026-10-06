@@ -2,12 +2,19 @@ name: Build and test
 on:
   push: # Run on any push
   pull_request: # Run on PRs
+  merge_group:
+permissions:
+  contents: read
+# Source build + `make installcheck` (pgxn-tools resolves the newest PGDG
+# build of each major, so PG 19 tracks the current beta). The pinned,
+# authoritative builds and tests are in packages.yml.
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        pg: [17, 18]
+        pg: [17, 18, 19]
     container:
       image: pgxn/pgxn-tools
     steps:

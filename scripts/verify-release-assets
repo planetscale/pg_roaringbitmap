@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+#
+# Fail-closed check of a release directory against packaging/release-assets.txt.
+# Every file must be a main or -dbgsym .deb for a contract row (canonical name
+# on Debian 12, pg<M>-trixie-<asset_arch>- prefix on Debian 13), or that .deb's
+# .sha256 sidecar containing exactly `sha256sum <asset>` output. Missing,
+# duplicate, unexpected or unparseable files, and mixed versions, all fail.
+# Versions must end in a Debian revision (-<n>), as `${tag#v}-1` does
+# (1.2.0-1.pscale2 -> 1.2.0-1.pscale2-1).
+
+set -euo pipefail
+
+VERSION=""
+if [[ "${1:-}" == --version ]]; then
+	VERSION=${2:-}
+	shift 2
+fi
+ROOT=${1:-}
+CONTRACT=${2:-packaging/release-assets.txt}
+
+if [[ ! -d "$ROOT" || ! -f "$CONTRACT" ]] || [[ $# -gt 2 ]] ||
+	[[ -n "$VERSION" && ! "$VERSION" =~ ^[0-9][0-9A-Za-z.+~-]*-[0-9]+$ ]]; then
+	echo "usage: scripts/verify-release-assets [--version <version>] <artifact-directory> [contract]" >&2
+	exit 1
+fi
+
+fail() {
+	echo "verify-release-assets: $*" >&2
+	exit 1
+}
+
+sha256_line() {
+	if command -v sha256sum >/dev/null; then
+		(cd "$1" && sha256sum "$2")
+	else
+		(cd "$1" && shasum -a 256 "$2")
+	fi
+}
+
+workdir=$(mktemp -d)
+expected="$workdir/expected"
+actual="$workdir/actual"
+versions="$workdir/versions"
+trap 'rm -rf "$workdir"' EXIT
+: >"$expected"
+: >"$actual"
+: >"$versions"
+
+while read -r major debian asset_arch deb_arch extra; do
+	[[ -z "$major" || "$major" == \#* ]] && continue
+	if [[ -n "${extra:-}" ]] || [[ ! "$major" =~ ^(17|18|19)$ ]] ||
+		[[ ! "$debian" =~ ^(12|13)$ ]] || [[ ! "$asset_arch:$deb_arch" =~ ^(x86_64:amd64|arm64:arm64)$ ]]; then
+		fail "invalid contract row: $major $debian $asset_arch $deb_arch ${extra:-}"
+	fi
+	for kind in main dbgsym; do
+		printf '%s|%s|%s|%s\n' "$major" "$debian" "$asset_arch" "$kind" >>"$expected"
+	done
+done <"$CONTRACT"
+
+sort -o "$expected" "$expected"
+[[ -s "$expected" ]] || fail "empty contract"
+if [[ -n $(uniq -d "$expected") ]]; then
+	fail "duplicate contract tuple: $(uniq -d "$expected" | xargs)"
+fi
+
+ver_re='([0-9][0-9A-Za-z.+~-]*-[0-9]+)'
+while IFS= read -r -d '' path; do
+	name=$(basename "$path")
+	dir=$(dirname "$path")
+	if [[ "$name" == *.deb.sha256 ]]; then
+		deb=${name%.sha256}
+		[[ -f "$dir/$deb" ]] || fail "orphan checksum: $name"
+		[[ "$(cat "$path")" == "$(sha256_line "$dir" "$deb")" ]] || fail "bad checksum file: $name"
+		continue
+	fi
+
+	if [[ "$name" =~ ^postgresql-(17|18|19)-roaringbitmap(-dbgsym)?_${ver_re}_(amd64|arm64)\.deb$ ]]; then
+		major=${BASH_REMATCH[1]}
+		debian=12
+		dbgsym=${BASH_REMATCH[2]}
+		version=${BASH_REMATCH[3]}
+		deb_arch=${BASH_REMATCH[4]}
+		asset_arch=$deb_arch
+		[[ "$deb_arch" == amd64 ]] && asset_arch=x86_64
+	elif [[ "$name" =~ ^pg(17|18|19)-trixie-(x86_64|arm64)-postgresql-(17|18|19)-roaringbitmap(-dbgsym)?_${ver_re}_(amd64|arm64)\.deb$ ]]; then
+		major=${BASH_REMATCH[1]}
+		debian=13
+		asset_arch=${BASH_REMATCH[2]}
+		dbgsym=${BASH_REMATCH[4]}
+		version=${BASH_REMATCH[5]}
+		deb_arch=${BASH_REMATCH[6]}
+		[[ "$major" == "${BASH_REMATCH[3]}" ]] || fail "major mismatch: $name"
+		[[ "$asset_arch:$deb_arch" =~ ^(x86_64:amd64|arm64:arm64)$ ]] || fail "architecture mismatch: $name"
+	else
+		fail "unexpected asset name: $name"
+	fi
+
+	[[ -f "$path.sha256" ]] || fail "missing checksum file: $name.sha256"
+	kind=main
+	[[ -n "$dbgsym" ]] && kind=dbgsym
+	printf '%s|%s|%s|%s\n' "$major" "$debian" "$asset_arch" "$kind" >>"$actual"
+	echo "$version" >>"$versions"
+done < <(find "$ROOT" -type f -print0)
+
+sort -o "$actual" "$actual"
+if [[ -n $(uniq -d "$actual") ]]; then
+	fail "duplicate artifact tuple: $(uniq -d "$actual" | xargs)"
+fi
+
+missing=$(comm -23 "$expected" "$actual")
+unexpected=$(comm -13 "$expected" "$actual")
+if [[ -n "$missing" || -n "$unexpected" ]]; then
+	[[ -n "$missing" ]] && echo "verify-release-assets: missing artifact tuples: $(xargs <<<"$missing")" >&2
+	[[ -n "$unexpected" ]] && echo "verify-release-assets: unexpected artifact tuples: $(xargs <<<"$unexpected")" >&2
+	exit 1
+fi
+
+if [[ $(sort -u "$versions" | wc -l) -ne 1 ]]; then
+	fail "inconsistent package versions: $(sort -u "$versions" | xargs)"
+fi
+if [[ -n "$VERSION" && "$(head -n 1 "$versions")" != "$VERSION" ]]; then
+	fail "package version $(head -n 1 "$versions") does not match expected $VERSION"
+fi
+
+echo "verify-release-assets: $(wc -l <"$actual" | tr -d ' ') packages (+ .sha256) for version $(head -n 1 "$versions") passed"

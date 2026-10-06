@@ -1,0 +1,145 @@
+# syntax=docker/dockerfile:1
+
+# Builds the PlanetScale pg_roaringbitmap .debs for exactly one PostgreSQL
+# major against pinned PGDG packages, then tests the exact packages in a clean
+# image.
+#
+#   build:    debian/ tree via dpkg-buildpackage (debian/rules skips
+#             dh_pgxs_test; scripts/test-package runs the suite instead)
+#   packages: release assets only (canonical names; pg<M>-trixie-<arch>- on
+#             Debian 13) plus <asset>.sha256 sidecars
+#   test:     fresh base image + pinned PostgreSQL runtime + scripts/test-package
+
+ARG BASE_IMAGE=debian:bookworm-slim@sha256:98f4b71de414932439ac6ac690d7060df1f27161073c5036a7553723881bffbe
+FROM ${BASE_IMAGE} AS build
+
+ARG DEBIAN_CODENAME
+ARG DEBIAN_VERSION
+ARG PACKAGE_VERSION
+ARG PG_MAJOR
+ARG PG_PACKAGE_VERSION
+
+RUN case "$DEBIAN_VERSION:$DEBIAN_CODENAME" in \
+        12:bookworm|13:trixie) ;; \
+        *) echo "unsupported Debian target: $DEBIAN_VERSION ($DEBIAN_CODENAME)" >&2; exit 1 ;; \
+    esac \
+    && case "$PG_MAJOR" in \
+        17|18|19) ;; \
+        *) echo "unsupported PostgreSQL major: $PG_MAJOR" >&2; exit 1 ;; \
+    esac \
+    && case "$PG_PACKAGE_VERSION" in \
+        "${PG_MAJOR}"[.~]*".pgdg${DEBIAN_VERSION}+"*) ;; \
+        *) echo "PG_PACKAGE_VERSION $PG_PACKAGE_VERSION does not match PG $PG_MAJOR / Debian $DEBIAN_VERSION" >&2; exit 1 ;; \
+    esac \
+    && test -n "$PACKAGE_VERSION"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    debhelper \
+    devscripts \
+    && rm -rf /var/lib/apt/lists/*
+
+# PGDG: component "19" only on PG 19 rows, so stable rows cannot resolve beta
+# packages. postgresql-server-dev-19 needs libpq-dev (>= 19~~), and component
+# 19 carries every beta's libpq, so pin libpq to the server version there.
+# Never install postgresql-all / postgresql-server-dev-all (unpinned 10-18).
+RUN install -d /usr/share/postgresql-common/pgdg \
+    && curl --fail --silent --show-error --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+        https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    && pgdg_components=main \
+    && libpq_pins= \
+    && if [ "$PG_MAJOR" = 19 ]; then \
+        pgdg_components="main 19"; \
+        libpq_pins="libpq5=${PG_PACKAGE_VERSION} libpq-dev=${PG_PACKAGE_VERSION}"; \
+    fi \
+    && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${DEBIAN_CODENAME}-pgdg ${pgdg_components}" \
+        > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        "postgresql-${PG_MAJOR}=${PG_PACKAGE_VERSION}" \
+        "postgresql-client-${PG_MAJOR}=${PG_PACKAGE_VERSION}" \
+        "postgresql-server-dev-${PG_MAJOR}=${PG_PACKAGE_VERSION}" \
+        postgresql-common-dev \
+        $libpq_pins \
+    && rm -rf /var/lib/apt/lists/* \
+    && majors=$(ls /usr/lib/postgresql | xargs) \
+    && if [ "$majors" != "$PG_MAJOR" ]; then \
+        echo "/usr/lib/postgresql has '$majors', expected only '$PG_MAJOR'" >&2; exit 1; \
+    fi
+
+COPY . /src/pg_roaringbitmap
+WORKDIR /src/pg_roaringbitmap
+
+# Restrict pg_buildext (debian/control, dh_pgxs_loop) to the one major this
+# row builds.
+ENV PG_SUPPORTED_VERSIONS=${PG_MAJOR}
+
+# -d: debian/control Build-Depends names postgresql-all/postgresql-server-dev-all,
+# which are deliberately not installed; the exact dependencies are above.
+RUN versions=$(pg_buildext supported-versions | xargs) \
+    && if [ "$versions" != "$PG_MAJOR" ]; then \
+        echo "pg_buildext supported-versions is '$versions', expected '$PG_MAJOR'" >&2; exit 1; \
+    fi \
+    && pg_buildext updatecontrol \
+    && test "$(grep '^Package: ' debian/control)" = "Package: postgresql-${PG_MAJOR}-roaringbitmap" \
+    && dch -v "$PACKAGE_VERSION" --distribution "$DEBIAN_CODENAME" "Custom PlanetScale build" \
+    && dpkg-buildpackage -us -uc -b -d
+
+RUN deb_arch=$(dpkg --print-architecture) \
+    && case "$deb_arch" in \
+        amd64) asset_arch=x86_64 ;; \
+        arm64) asset_arch=arm64 ;; \
+        *) echo "unsupported package architecture: $deb_arch" >&2; exit 1 ;; \
+    esac \
+    && prefix= \
+    && if [ "$DEBIAN_CODENAME" = trixie ]; then prefix="pg${PG_MAJOR}-trixie-${asset_arch}-"; fi \
+    && main="postgresql-${PG_MAJOR}-roaringbitmap_${PACKAGE_VERSION}_${deb_arch}.deb" \
+    && dbgsym="postgresql-${PG_MAJOR}-roaringbitmap-dbgsym_${PACKAGE_VERSION}_${deb_arch}.deb" \
+    && built=$(cd /src && ls -1 ./*.deb | sed 's|^\./||' | sort | xargs) \
+    && if [ "$built" != "$main $dbgsym" ] && [ "$built" != "$dbgsym $main" ]; then \
+        echo "unexpected build outputs: $built" >&2; exit 1; \
+    fi \
+    && install -d /packages \
+    && cp "/src/$main" "/packages/${prefix}${main}" \
+    && cp "/src/$dbgsym" "/packages/${prefix}${dbgsym}" \
+    && cd /packages \
+    && for f in *.deb; do sha256sum "$f" > "$f.sha256"; done \
+    && ls -l /packages
+
+FROM scratch AS packages
+COPY --from=build /packages/ /
+
+# Clean image for testing the exact packages: only the pinned PostgreSQL
+# runtime from PGDG, with no toolchain or build tree. postgresql-client-<M>
+# ships pg_config and pg_regress, so the regression suite runs against the
+# installed .so without postgresql-server-dev-<M>.
+FROM ${BASE_IMAGE} AS test
+ARG PG_MAJOR
+ARG PG_PACKAGE_VERSION
+ENV PG_MAJOR=${PG_MAJOR} \
+    PG_PACKAGE_VERSION=${PG_PACKAGE_VERSION}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc /usr/share/postgresql-common/pgdg/
+COPY --from=build /etc/apt/sources.list.d/pgdg.list /etc/apt/sources.list.d/
+
+RUN libpq_pins= \
+    && if [ "$PG_MAJOR" = 19 ]; then libpq_pins="libpq5=${PG_PACKAGE_VERSION}"; fi \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        "postgresql-${PG_MAJOR}=${PG_PACKAGE_VERSION}" \
+        "postgresql-client-${PG_MAJOR}=${PG_PACKAGE_VERSION}" \
+        $libpq_pins \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=packages / /packages/
+COPY sql/ /src/sql/
+COPY expected/ /src/expected/
+COPY scripts/test-package /src/scripts/
+WORKDIR /src
+ENTRYPOINT ["/src/scripts/test-package"]

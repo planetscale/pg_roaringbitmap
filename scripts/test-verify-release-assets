@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+#
+# Fixture self-tests for scripts/verify-release-assets: the full good set must
+# pass, and every broken variant must fail.
+
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+VERIFY="$ROOT/scripts/verify-release-assets"
+CONTRACT="$ROOT/packaging/release-assets.txt"
+V=1.2.0-1.pscale2-1
+workdir=$(mktemp -d)
+trap 'rm -rf "$workdir"' EXIT
+
+sha256_line() {
+	if command -v sha256sum >/dev/null; then
+		(cd "$1" && sha256sum "$2")
+	else
+		(cd "$1" && shasum -a 256 "$2")
+	fi
+}
+
+# add <dir> <asset>: an asset with distinct content and a correct sidecar
+add() {
+	echo "$2" >"$1/$2"
+	sha256_line "$1" "$2" >"$1/$2.sha256"
+}
+
+populate() {
+	local target=$1 major debian asset_arch deb_arch prefix kind
+	mkdir -p "$target"
+	while read -r major debian asset_arch deb_arch; do
+		[[ -z "$major" || "$major" == \#* ]] && continue
+		prefix=""
+		[[ "$debian" == 13 ]] && prefix="pg${major}-trixie-${asset_arch}-"
+		for kind in "" -dbgsym; do
+			add "$target" "${prefix}postgresql-${major}-roaringbitmap${kind}_${V}_${deb_arch}.deb"
+		done
+	done <"$CONTRACT"
+}
+
+case_num=0
+expect_fail() {
+	local label=$1 err
+	shift
+	if err=$("$VERIFY" "$@" 2>&1 >/dev/null); then
+		echo "test-verify-release-assets: FAIL: '$label' passed" >&2
+		exit 1
+	fi
+	echo "  rejected $label: ${err#verify-release-assets: }"
+	last_err=$err
+	case_num=$((case_num + 1))
+}
+
+# expect_error <label> <substring>: the last rejection was for this reason
+expect_error() {
+	if [[ "$last_err" != *"$2"* ]]; then
+		echo "test-verify-release-assets: FAIL: '$1' rejected for the wrong reason (want: $2)" >&2
+		exit 1
+	fi
+}
+
+fixture() {
+	local dir="$workdir/$1"
+	populate "$dir"
+	echo "$dir"
+}
+
+good=$(fixture good)
+[[ $(find "$good" -type f | wc -l) -eq 40 ]]
+"$VERIFY" --version "$V" "$good" "$CONTRACT"
+
+d=$(fixture missing)
+rm "$d/postgresql-17-roaringbitmap_${V}_amd64.deb" "$d/postgresql-17-roaringbitmap_${V}_amd64.deb.sha256"
+expect_fail "missing asset" "$d" "$CONTRACT"
+
+d=$(fixture missing-dbgsym)
+rm "$d/pg19-trixie-arm64-postgresql-19-roaringbitmap-dbgsym_${V}_arm64.deb"*
+expect_fail "missing dbgsym" "$d" "$CONTRACT"
+
+d=$(fixture unexpected-pg17-trixie)
+add "$d" "pg17-trixie-x86_64-postgresql-17-roaringbitmap_${V}_amd64.deb"
+expect_fail "unexpected pg17 trixie" "$d" "$CONTRACT"
+
+d=$(fixture duplicate)
+add "$d" "postgresql-19-roaringbitmap_1.2.0-1.pscale3-1_arm64.deb"
+expect_fail "duplicate tuple" "$d" "$CONTRACT"
+
+# A Debian 13 build shipped under the canonical (Debian 12) name, e.g. from
+# an unmerged per-job artifact directory: the unprefixed file parses as the
+# PG 19 / Debian 12 / arm64 package, which is then present twice. (In one flat
+# directory it would overwrite the Debian 12 file; that is the "missing" case.)
+d=$(fixture canonical-on-trixie)
+rm "$d/pg19-trixie-arm64-postgresql-19-roaringbitmap_${V}_arm64.deb"*
+mkdir "$d/pg19-debian13-arm64"
+add "$d/pg19-debian13-arm64" "postgresql-19-roaringbitmap_${V}_arm64.deb"
+expect_fail "trixie row without prefix" "$d" "$CONTRACT"
+expect_error "trixie row without prefix" "duplicate artifact tuple: 19|12|arm64|main"
+
+d=$(fixture major-mismatch)
+rm "$d/pg19-trixie-x86_64-postgresql-19-roaringbitmap_${V}_amd64.deb"*
+add "$d" "pg19-trixie-x86_64-postgresql-18-roaringbitmap_${V}_amd64.deb"
+expect_fail "prefix/package major mismatch" "$d" "$CONTRACT"
+
+d=$(fixture arch-mismatch)
+rm "$d/pg18-trixie-arm64-postgresql-18-roaringbitmap_${V}_arm64.deb"*
+add "$d" "pg18-trixie-arm64-postgresql-18-roaringbitmap_${V}_amd64.deb"
+expect_fail "prefix/package arch mismatch" "$d" "$CONTRACT"
+
+d=$(fixture orphan-sha256)
+rm "$d/postgresql-18-roaringbitmap-dbgsym_${V}_amd64.deb"
+expect_fail "orphan .sha256" "$d" "$CONTRACT"
+
+d=$(fixture missing-sha256)
+rm "$d/postgresql-18-roaringbitmap_${V}_arm64.deb.sha256"
+expect_fail "missing .sha256" "$d" "$CONTRACT"
+
+d=$(fixture bad-sha256)
+echo corrupted >>"$d/pg18-trixie-x86_64-postgresql-18-roaringbitmap_${V}_amd64.deb"
+expect_fail "corrupted .sha256" "$d" "$CONTRACT"
+
+d=$(fixture sha256-path)
+(cd "$d" && sha256_line "$d" "postgresql-17-roaringbitmap_${V}_arm64.deb" |
+	sed "s|  |  ./|" >"postgresql-17-roaringbitmap_${V}_arm64.deb.sha256")
+expect_fail ".sha256 with a path prefix" "$d" "$CONTRACT"
+
+d=$(fixture stray-buildinfo)
+touch "$d/pg-roaringbitmap_${V}_amd64.buildinfo"
+expect_fail "stray .buildinfo" "$d" "$CONTRACT"
+
+d=$(fixture sha256-sha256)
+sha256_line "$d" "postgresql-18-roaringbitmap_${V}_amd64.deb.sha256" >"$d/postgresql-18-roaringbitmap_${V}_amd64.deb.sha256.sha256"
+expect_fail "sidecar of a sidecar" "$d" "$CONTRACT"
+
+d=$(fixture mixed-versions)
+rm "$d/postgresql-17-roaringbitmap_${V}_arm64.deb"*
+add "$d" "postgresql-17-roaringbitmap_1.2.0-1.pscale3-1_arm64.deb"
+expect_fail "mixed versions" "$d" "$CONTRACT"
+
+d="$workdir/no-revision"
+V=1.2.0-1.pscale2 populate "$d"
+expect_fail "version without the -1 revision" "$d" "$CONTRACT"
+
+expect_fail "wrong --version" --version 1.2.0-1.pscale1-1 "$good" "$CONTRACT"
+expect_fail "--version without the -1 revision" --version 1.2.0-1.pscale2 "$good" "$CONTRACT"
+
+empty="$workdir/empty"
+mkdir -p "$empty"
+expect_fail "empty directory" "$empty" "$CONTRACT"
+
+echo "test-verify-release-assets: good set passed, $case_num broken sets rejected"
