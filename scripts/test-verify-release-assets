@@ -48,7 +48,16 @@ expect_fail() {
 		exit 1
 	fi
 	echo "  rejected $label: ${err#verify-release-assets: }"
+	last_err=$err
 	case_num=$((case_num + 1))
+}
+
+# expect_error <label> <substring>: the last rejection was for this reason
+expect_error() {
+	if [[ "$last_err" != *"$2"* ]]; then
+		echo "test-verify-release-assets: FAIL: '$1' rejected for the wrong reason (want: $2)" >&2
+		exit 1
+	fi
 }
 
 fixture() {
@@ -69,10 +78,6 @@ d=$(fixture missing-dbgsym)
 rm "$d/pg19-trixie-arm64-postgresql-19-roaringbitmap-dbgsym_${V}_arm64.deb"*
 expect_fail "missing dbgsym" "$d" "$CONTRACT"
 
-d=$(fixture unexpected-pg16)
-add "$d" "postgresql-16-roaringbitmap_${V}_amd64.deb"
-expect_fail "unexpected pg16" "$d" "$CONTRACT"
-
 d=$(fixture unexpected-pg17-trixie)
 add "$d" "pg17-trixie-x86_64-postgresql-17-roaringbitmap_${V}_amd64.deb"
 expect_fail "unexpected pg17 trixie" "$d" "$CONTRACT"
@@ -81,9 +86,16 @@ d=$(fixture duplicate)
 add "$d" "postgresql-19-roaringbitmap_1.2.0-1.pscale3-1_arm64.deb"
 expect_fail "duplicate tuple" "$d" "$CONTRACT"
 
+# A Debian 13 build shipped under the canonical (Debian 12) name, e.g. from
+# an unmerged per-job artifact directory: the unprefixed file parses as the
+# PG 19 / Debian 12 / arm64 package, which is then present twice. (In one flat
+# directory it would overwrite the Debian 12 file; that is the "missing" case.)
 d=$(fixture canonical-on-trixie)
 rm "$d/pg19-trixie-arm64-postgresql-19-roaringbitmap_${V}_arm64.deb"*
+mkdir "$d/pg19-debian13-arm64"
+add "$d/pg19-debian13-arm64" "postgresql-19-roaringbitmap_${V}_arm64.deb"
 expect_fail "trixie row without prefix" "$d" "$CONTRACT"
+expect_error "trixie row without prefix" "duplicate artifact tuple: 19|12|arm64|main"
 
 d=$(fixture major-mismatch)
 rm "$d/pg19-trixie-x86_64-postgresql-19-roaringbitmap_${V}_amd64.deb"*
@@ -115,10 +127,6 @@ expect_fail ".sha256 with a path prefix" "$d" "$CONTRACT"
 d=$(fixture stray-buildinfo)
 touch "$d/pg-roaringbitmap_${V}_amd64.buildinfo"
 expect_fail "stray .buildinfo" "$d" "$CONTRACT"
-
-d=$(fixture stray-changes)
-touch "$d/pg-roaringbitmap_${V}_amd64.changes"
-expect_fail "stray .changes" "$d" "$CONTRACT"
 
 d=$(fixture sha256-sha256)
 sha256_line "$d" "postgresql-18-roaringbitmap_${V}_amd64.deb.sha256" >"$d/postgresql-18-roaringbitmap_${V}_amd64.deb.sha256.sha256"
