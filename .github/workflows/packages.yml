@@ -21,7 +21,7 @@ permissions:
 jobs:
   version:
     name: Package version
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -56,70 +56,70 @@ jobs:
             codename: bookworm
             base_image: debian:bookworm-slim@sha256:98f4b71de414932439ac6ac690d7060df1f27161073c5036a7553723881bffbe
             asset_arch: x86_64
-            runner: depot-ubuntu-24.04-4
+            runner: ubuntu-latest
           - pg: 17
             pg_package_version: 17.11-1.pgdg12+2
             debian: 12
             codename: bookworm
             base_image: debian:bookworm-slim@sha256:98f4b71de414932439ac6ac690d7060df1f27161073c5036a7553723881bffbe
             asset_arch: arm64
-            runner: depot-ubuntu-24.04-arm-4
+            runner: ubuntu-24.04-arm
           - pg: 18
             pg_package_version: 18.6-1.pgdg12+2
             debian: 12
             codename: bookworm
             base_image: debian:bookworm-slim@sha256:98f4b71de414932439ac6ac690d7060df1f27161073c5036a7553723881bffbe
             asset_arch: x86_64
-            runner: depot-ubuntu-24.04-4
+            runner: ubuntu-latest
           - pg: 18
             pg_package_version: 18.6-1.pgdg12+2
             debian: 12
             codename: bookworm
             base_image: debian:bookworm-slim@sha256:98f4b71de414932439ac6ac690d7060df1f27161073c5036a7553723881bffbe
             asset_arch: arm64
-            runner: depot-ubuntu-24.04-arm-4
+            runner: ubuntu-24.04-arm
           - pg: 18
             pg_package_version: 18.6-1.pgdg13+2
             debian: 13
             codename: trixie
             base_image: debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
             asset_arch: x86_64
-            runner: depot-ubuntu-24.04-4
+            runner: ubuntu-latest
           - pg: 18
             pg_package_version: 18.6-1.pgdg13+2
             debian: 13
             codename: trixie
             base_image: debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
             asset_arch: arm64
-            runner: depot-ubuntu-24.04-arm-4
+            runner: ubuntu-24.04-arm
           - pg: 19
             pg_package_version: 19~beta4-1.pgdg12+1
             debian: 12
             codename: bookworm
             base_image: debian:bookworm-slim@sha256:98f4b71de414932439ac6ac690d7060df1f27161073c5036a7553723881bffbe
             asset_arch: x86_64
-            runner: depot-ubuntu-24.04-4
+            runner: ubuntu-latest
           - pg: 19
             pg_package_version: 19~beta4-1.pgdg12+1
             debian: 12
             codename: bookworm
             base_image: debian:bookworm-slim@sha256:98f4b71de414932439ac6ac690d7060df1f27161073c5036a7553723881bffbe
             asset_arch: arm64
-            runner: depot-ubuntu-24.04-arm-4
+            runner: ubuntu-24.04-arm
           - pg: 19
             pg_package_version: 19~beta4-1.pgdg13+1
             debian: 13
             codename: trixie
             base_image: debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
             asset_arch: x86_64
-            runner: depot-ubuntu-24.04-4
+            runner: ubuntu-latest
           - pg: 19
             pg_package_version: 19~beta4-1.pgdg13+1
             debian: 13
             codename: trixie
             base_image: debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
             asset_arch: arm64
-            runner: depot-ubuntu-24.04-arm-4
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -169,7 +169,7 @@ jobs:
   inventory:
     name: Release inventory
     needs: [version, package]
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -190,7 +190,7 @@ jobs:
   release:
     if: github.ref_type == 'tag'
     needs: [version, inventory]
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
