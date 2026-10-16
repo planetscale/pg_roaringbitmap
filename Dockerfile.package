@@ -41,9 +41,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     devscripts \
     && rm -rf /var/lib/apt/lists/*
 
-# PGDG: component "19" only on PG 19 rows, so stable rows cannot resolve beta
+# PGDG: component "19" only on PG 19 rows, so stable rows cannot resolve pre-release
 # packages. postgresql-server-dev-19 needs libpq-dev (>= 19~~), and component
-# 19 carries every beta's libpq, so pin libpq to the server version there.
+# 19 carries every pre-release's libpq, so pin libpq to the server version there.
 # Never install postgresql-all / postgresql-server-dev-all (unpinned 10-18).
 RUN install -d /usr/share/postgresql-common/pgdg \
     && curl --fail --silent --show-error --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \

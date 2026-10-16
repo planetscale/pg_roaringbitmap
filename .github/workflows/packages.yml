@@ -50,7 +50,7 @@ jobs:
       fail-fast: false
       matrix:
         # pg_package_version pins exact PGDG builds, and PGDG drops superseded
-        # ones (19~beta4 first). The renovate comments use postgres-private's
+        # ones (19~rc1 first). The renovate comments use postgres-private's
         # deb-datasource form so Renovate can propose bumps as PRs; they are
         # inert until Renovate is enabled here with a manager for this file.
         include:
@@ -104,7 +104,7 @@ jobs:
             runner: ubuntu-24.04-arm
           - pg: 19
             # renovate: datasource=deb depName=postgresql-19 registryUrl=https://apt.postgresql.org/pub/repos/apt?suite=bookworm-pgdg&binaryArch=amd64&components=19
-            pg_package_version: 19~beta4-1.pgdg12+1
+            pg_package_version: 19~rc1-1.pgdg12+1
             debian: 12
             codename: bookworm
             base_image: debian:bookworm-slim@sha256:98f4b71de414932439ac6ac690d7060df1f27161073c5036a7553723881bffbe
@@ -112,7 +112,7 @@ jobs:
             runner: ubuntu-latest
           - pg: 19
             # renovate: datasource=deb depName=postgresql-19 registryUrl=https://apt.postgresql.org/pub/repos/apt?suite=bookworm-pgdg&binaryArch=arm64&components=19
-            pg_package_version: 19~beta4-1.pgdg12+1
+            pg_package_version: 19~rc1-1.pgdg12+1
             debian: 12
             codename: bookworm
             base_image: debian:bookworm-slim@sha256:98f4b71de414932439ac6ac690d7060df1f27161073c5036a7553723881bffbe
@@ -120,7 +120,7 @@ jobs:
             runner: ubuntu-24.04-arm
           - pg: 19
             # renovate: datasource=deb depName=postgresql-19 registryUrl=https://apt.postgresql.org/pub/repos/apt?suite=trixie-pgdg&binaryArch=amd64&components=19
-            pg_package_version: 19~beta4-1.pgdg13+1
+            pg_package_version: 19~rc1-1.pgdg13+1
             debian: 13
             codename: trixie
             base_image: debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
@@ -128,7 +128,7 @@ jobs:
             runner: ubuntu-latest
           - pg: 19
             # renovate: datasource=deb depName=postgresql-19 registryUrl=https://apt.postgresql.org/pub/repos/apt?suite=trixie-pgdg&binaryArch=arm64&components=19
-            pg_package_version: 19~beta4-1.pgdg13+1
+            pg_package_version: 19~rc1-1.pgdg13+1
             debian: 13
             codename: trixie
             base_image: debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2

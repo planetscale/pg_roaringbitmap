@@ -6,7 +6,7 @@ on:
 permissions:
   contents: read
 # Source build + `make installcheck` (pgxn-tools resolves the newest PGDG
-# build of each major, so PG 19 tracks the current beta). The pinned,
+# build of each major, so PG 19 tracks the current pre-release). The pinned,
 # authoritative builds and tests are in packages.yml.
 jobs:
   test:
